@@ -265,7 +265,7 @@ fn config_secret_set_supports_env_stdin_and_encrypted_sources() {
     let config = std::fs::read_to_string(temp.path().join("config.toml"))
         .expect("config should be readable");
     assert!(config.contains("type = \"encrypted\""));
-    assert!(config.contains("v1:"));
+    assert!(config.contains("v2:"));
     assert!(config.contains("type = \"env\""));
     assert!(config.contains("ROSWIRE_RUNTIME_PASSWORD"));
     assert!(!config.contains(&env_secret));

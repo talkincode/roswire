@@ -1,11 +1,11 @@
 use crate::args::Cli;
 use crate::error::{ErrorCode, ErrorContext, RosWireError, RosWireResult};
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use directories::BaseDirs;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -33,6 +33,12 @@ fn default_logging_level() -> String {
 }
 
 const DEFAULT_MASTER_KEY_ENV: &str = "ROSWIRE_MASTER_KEY";
+
+const SECRET_SALT_LEN: usize = 16;
+const SECRET_NONCE_LEN: usize = 12;
+const SECRET_PBKDF2_ITERATIONS: u32 = 600_000;
+const SECRET_PBKDF2_MIN_ITERATIONS: u32 = 100_000;
+const SECRET_PBKDF2_MAX_ITERATIONS: u32 = 2_000_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ConfigFile {
@@ -471,32 +477,122 @@ fn encrypted_master_key(
 }
 
 fn encrypt_secret_value(value: &str, master_key: &str) -> RosWireResult<String> {
-    let key = derive_encryption_key(master_key);
+    let salt: [u8; SECRET_SALT_LEN] = OsRng.gen();
+    let nonce: [u8; SECRET_NONCE_LEN] = OsRng.gen();
+
+    let iterations = SECRET_PBKDF2_ITERATIONS;
+    let key = derive_encryption_key_pbkdf2(master_key, &salt, iterations);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
         Box::new(RosWireError::internal(format!(
             "failed to initialize secret cipher: {error}",
         )))
     })?;
-    let mut nonce = [0_u8; 12];
-    OsRng.fill_bytes(&mut nonce);
+
+    let header = format!(
+        "v2:{iterations}:{}:{}",
+        BASE64_STANDARD.encode(salt),
+        BASE64_STANDARD.encode(nonce),
+    );
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), value.as_bytes())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: value.as_bytes(),
+                aad: header.as_bytes(),
+            },
+        )
         .map_err(|_| {
             Box::new(RosWireError::secret_decrypt_failed(
                 "failed to encrypt secret",
             ))
         })?;
 
-    Ok(format!(
-        "v1:{}:{}",
-        BASE64_STANDARD.encode(nonce),
-        BASE64_STANDARD.encode(ciphertext)
-    ))
+    Ok(format!("{header}:{}", BASE64_STANDARD.encode(ciphertext)))
 }
 
 fn decrypt_secret_value(value: &str, master_key: &str) -> RosWireResult<String> {
     let parts = value.split(':').collect::<Vec<_>>();
-    if parts.len() != 3 || parts[0] != "v1" {
+    match parts.first().copied() {
+        Some("v2") => decrypt_secret_value_v2(&parts, master_key),
+        Some("v1") => decrypt_secret_value_v1(&parts, master_key),
+        _ => Err(Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret payload has an unsupported format",
+        ))),
+    }
+}
+
+fn decrypt_secret_value_v2(parts: &[&str], master_key: &str) -> RosWireResult<String> {
+    if parts.len() != 5 {
+        return Err(Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret payload has an unsupported format",
+        )));
+    }
+
+    let iterations = parts[1].parse::<u32>().map_err(|_| {
+        Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret iteration count is invalid",
+        ))
+    })?;
+    if !(SECRET_PBKDF2_MIN_ITERATIONS..=SECRET_PBKDF2_MAX_ITERATIONS).contains(&iterations) {
+        return Err(Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret iteration count is out of range",
+        )));
+    }
+
+    let salt = BASE64_STANDARD.decode(parts[2]).map_err(|_| {
+        Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret salt is invalid",
+        ))
+    })?;
+    if salt.len() != SECRET_SALT_LEN {
+        return Err(Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret salt has invalid length",
+        )));
+    }
+
+    let nonce = BASE64_STANDARD.decode(parts[3]).map_err(|_| {
+        Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret nonce is invalid",
+        ))
+    })?;
+    if nonce.len() != SECRET_NONCE_LEN {
+        return Err(Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret nonce has invalid length",
+        )));
+    }
+
+    let ciphertext = BASE64_STANDARD.decode(parts[4]).map_err(|_| {
+        Box::new(RosWireError::secret_decrypt_failed(
+            "encrypted secret ciphertext is invalid",
+        ))
+    })?;
+
+    let header = format!("v2:{iterations}:{}:{}", parts[2], parts[3]);
+    let key = derive_encryption_key_pbkdf2(master_key, &salt, iterations);
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
+        Box::new(RosWireError::internal(format!(
+            "failed to initialize secret cipher: {error}",
+        )))
+    })?;
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: ciphertext.as_ref(),
+                aad: header.as_bytes(),
+            },
+        )
+        .map_err(|_| RosWireError::secret_decrypt_failed("failed to decrypt secret"))?;
+
+    String::from_utf8(plaintext).map_err(|_| {
+        Box::new(RosWireError::secret_decrypt_failed(
+            "decrypted secret is not valid UTF-8",
+        ))
+    })
+}
+
+fn decrypt_secret_value_v1(parts: &[&str], master_key: &str) -> RosWireResult<String> {
+    if parts.len() != 3 {
         return Err(Box::new(RosWireError::secret_decrypt_failed(
             "encrypted secret payload has an unsupported format",
         )));
@@ -512,13 +608,13 @@ fn decrypt_secret_value(value: &str, master_key: &str) -> RosWireResult<String> 
             "encrypted secret ciphertext is invalid",
         ))
     })?;
-    if nonce.len() != 12 {
+    if nonce.len() != SECRET_NONCE_LEN {
         return Err(Box::new(RosWireError::secret_decrypt_failed(
             "encrypted secret nonce has invalid length",
         )));
     }
 
-    let key = derive_encryption_key(master_key);
+    let key = derive_encryption_key_legacy(master_key);
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|error| {
         Box::new(RosWireError::internal(format!(
             "failed to initialize secret cipher: {error}",
@@ -535,7 +631,13 @@ fn decrypt_secret_value(value: &str, master_key: &str) -> RosWireResult<String> 
     })
 }
 
-fn derive_encryption_key(master_key: &str) -> [u8; 32] {
+fn derive_encryption_key_pbkdf2(master_key: &str, salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut key = [0_u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha256>(master_key.as_bytes(), salt, iterations, &mut key);
+    key
+}
+
+fn derive_encryption_key_legacy(master_key: &str) -> [u8; 32] {
     Sha256::digest(master_key.as_bytes()).into()
 }
 
@@ -1673,6 +1775,104 @@ retention_days = 7
         let error = resolve_profile_secret_value(&profile, "password", &env)
             .expect_err("wrong master key should fail");
 
+        assert!(has_error_code(&error, ErrorCode::SecretDecryptFailed));
+    }
+
+    #[test]
+    fn encrypt_emits_versioned_salted_payload() {
+        let encrypted = encrypt_secret_value(&generated_secret(), &generated_master_key())
+            .expect("secret should encrypt");
+
+        let parts = encrypted.split(':').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 5, "v2 payload must have 5 fields: {encrypted}");
+        assert_eq!(parts[0], "v2");
+        assert_eq!(
+            parts[1],
+            SECRET_PBKDF2_ITERATIONS.to_string(),
+            "iteration count must be embedded",
+        );
+        assert_eq!(
+            BASE64_STANDARD.decode(parts[2]).expect("salt b64").len(),
+            SECRET_SALT_LEN,
+        );
+        assert_eq!(
+            BASE64_STANDARD.decode(parts[3]).expect("nonce b64").len(),
+            SECRET_NONCE_LEN,
+        );
+    }
+
+    #[test]
+    fn encrypt_uses_random_salt_per_invocation() {
+        let secret = generated_secret();
+        let master_key = generated_master_key();
+
+        let first = encrypt_secret_value(&secret, &master_key).expect("first encrypt");
+        let second = encrypt_secret_value(&secret, &master_key).expect("second encrypt");
+
+        let first_salt = first.split(':').nth(2).expect("first salt");
+        let second_salt = second.split(':').nth(2).expect("second salt");
+        assert_ne!(first_salt, second_salt, "salt must be random per secret");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn legacy_v1_payload_still_decrypts() {
+        let secret = generated_secret();
+        let master_key = generated_master_key();
+
+        let key = derive_encryption_key_legacy(&master_key);
+        let cipher = Aes256Gcm::new_from_slice(&key).expect("cipher");
+        let nonce: [u8; SECRET_NONCE_LEN] = OsRng.gen();
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), secret.as_bytes())
+            .expect("legacy encrypt");
+        let legacy = format!(
+            "v1:{}:{}",
+            BASE64_STANDARD.encode(nonce),
+            BASE64_STANDARD.encode(ciphertext),
+        );
+
+        let resolved = decrypt_secret_value(&legacy, &master_key).expect("legacy decrypt");
+        assert_eq!(resolved, secret);
+    }
+
+    #[test]
+    fn v2_rejects_tampered_header() {
+        let secret = generated_secret();
+        let master_key = generated_master_key();
+        let encrypted = encrypt_secret_value(&secret, &master_key).expect("encrypt");
+
+        let parts = encrypted.split(':').collect::<Vec<_>>();
+        let tampered = format!(
+            "v2:{}:{}:{}:{}",
+            SECRET_PBKDF2_ITERATIONS + 1,
+            parts[2],
+            parts[3],
+            parts[4],
+        );
+
+        let error = decrypt_secret_value(&tampered, &master_key)
+            .expect_err("tampered AAD must fail authentication");
+        assert!(has_error_code(&error, ErrorCode::SecretDecryptFailed));
+    }
+
+    #[test]
+    fn v2_rejects_out_of_range_iterations() {
+        let secret = generated_secret();
+        let master_key = generated_master_key();
+        let encrypted = encrypt_secret_value(&secret, &master_key).expect("encrypt");
+        let parts = encrypted.split(':').collect::<Vec<_>>();
+
+        let payload = format!("v2:1:{}:{}:{}", parts[2], parts[3], parts[4]);
+        let error = decrypt_secret_value(&payload, &master_key)
+            .expect_err("iteration count below floor must be rejected");
+        assert!(has_error_code(&error, ErrorCode::SecretDecryptFailed));
+    }
+
+    #[test]
+    fn unknown_version_prefix_is_rejected() {
+        let error = decrypt_secret_value("v9:foo:bar", &generated_master_key())
+            .expect_err("unknown version must be rejected");
         assert!(has_error_code(&error, ErrorCode::SecretDecryptFailed));
     }
 

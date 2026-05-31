@@ -156,7 +156,7 @@ level = "info"
 | 类型 | 配置写法 | 安全等级 | 结论 |
 | --- | --- | --- | --- |
 | 明文 | `type = "plain"` + `value = "..."` | 低 | 仅允许实验室、一次性测试或 CI 临时目录；必须配合 `0600` 权限和显式 `allow_plain_secrets = true` |
-| 本地加密 | `type = "encrypted"` + `value = "v1:..."` | 中 | 可以降低误读配置文件的风险，但不能替代钥匙链；禁止使用编译进程序的固定密钥 |
+| 本地加密 | `type = "encrypted"` + `value = "v2:..."`（PBKDF2-HMAC-SHA256 加盐派生 + AES-256-GCM，兼容旧版 `v1:`） | 中 | 可以降低误读配置文件的风险，但不能替代钥匙链；禁止使用编译进程序的固定密钥 |
 | 本机钥匙链 | `type = "keychain"` + `service/account` | 高 | 默认推荐方案；macOS Keychain、Linux Secret Service、Windows Credential Manager |
 
 `type = "same-as"` 只是引用另一个 secret，不是第四种保存方式；解析时必须检测循环引用。
@@ -180,7 +180,7 @@ value = "lab-only-password"
 [profiles.edge.secrets.password]
 type = "encrypted"
 key_id = "default"
-value = "v1:base64-nonce-and-ciphertext"
+value = "v2:iterations:base64-salt:base64-nonce:base64-ciphertext"
 ```
 
 本机钥匙链示例：

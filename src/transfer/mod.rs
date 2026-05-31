@@ -863,7 +863,7 @@ fn execute_import_workflow<B: WorkflowBackend>(
 
     if let Err(error) = backend.execute_control(&control, context) {
         if cli.cleanup {
-            backend.remove_remote_file(&temporary_remote, context)?;
+            let _ = backend.remove_remote_file(&temporary_remote, context);
         }
         return Err(error);
     }
@@ -3807,6 +3807,46 @@ value = "profile-phrase"
     }
 
     #[test]
+    fn import_control_error_survives_cleanup_failure() {
+        let cli = Cli::try_parse_from(["roswire", "import", "setup.rsc", "--cleanup"])
+            .expect("cli should parse");
+        let command = parse_transfer_command(&cli.tokens)
+            .expect("transfer command should be detected")
+            .expect("transfer command should parse");
+        let mut backend = FakeWorkflowBackend {
+            fail_control: true,
+            fail_remove: true,
+            ..FakeWorkflowBackend::default()
+        };
+
+        let error = execute_file_workflow(
+            &command,
+            &cli,
+            &[],
+            &default_transfer_policy(),
+            &mut backend,
+            &workflow_context("import"),
+        )
+        .expect_err("import control failure should propagate");
+
+        assert_eq!(error.error_code, ErrorCode::RosApiFailure);
+        assert!(error.message.contains("import control command failed"));
+        assert!(
+            !error.message.contains("cleanup failed"),
+            "cleanup failure must not mask the original control error: {}",
+            error.message,
+        );
+        assert!(
+            backend
+                .events
+                .iter()
+                .any(|event| event.starts_with("remove:")),
+            "best-effort cleanup should still be attempted: {:?}",
+            backend.events,
+        );
+    }
+
+    #[test]
     fn control_runtime_uses_api_credentials_separately_from_ssh_credentials() {
         let cli = Cli::try_parse_from([
             "roswire",
@@ -4082,6 +4122,7 @@ value = "profile-secret"
         fail_wait: bool,
         wait_failures_remaining: usize,
         fail_remove: bool,
+        fail_control: bool,
         ssh_snapshot: SshServiceSnapshot,
         ssh_apply_count: usize,
         fail_ssh_apply_on: Option<usize>,
@@ -4154,6 +4195,12 @@ value = "profile-secret"
         ) -> crate::error::RosWireResult<()> {
             self.events
                 .push(format!("control:{}", command.classic_words().join(" ")));
+            if self.fail_control {
+                return Err(Box::new(
+                    crate::error::RosWireError::ros_api_failure("import control command failed")
+                        .with_context(_context.clone()),
+                ));
+            }
             Ok(())
         }
 

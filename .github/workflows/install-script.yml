@@ -1,0 +1,72 @@
+name: Install Script
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - scripts/install.sh
+      - .github/workflows/install-script.yml
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - .github/workflows/install-script.yml
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: lint (shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: POSIX syntax check
+        run: sh -n scripts/install.sh
+
+      - name: ShellCheck
+        run: shellcheck --shell=sh scripts/install.sh
+
+  cli:
+    name: cli behaviour
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: --help exits 0
+        run: sh scripts/install.sh --help
+
+      - name: unknown argument fails
+        run: |
+          if sh scripts/install.sh --bogus; then
+            echo "expected install.sh to reject unknown argument" >&2
+            exit 1
+          fi
+
+  e2e-install:
+    name: e2e install (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install latest release via install.sh
+        env:
+          ROSWIRE_REPO: ${{ github.repository }}
+          ROSWIRE_INSTALL_DIR: ${{ runner.temp }}/bin
+        run: sh scripts/install.sh
+
+      - name: Verify installed binary
+        run: |
+          BIN="${{ runner.temp }}/bin/roswire"
+          [ -x "$BIN" ] || { echo "roswire binary was not installed" >&2; exit 1; }
+          "$BIN" --version

@@ -1,7 +1,8 @@
 name: RouterOS Integration
 
+# Manual-only: this job boots a RouterOS CHR container and is too slow to
+# run on every pull request. Trigger it on demand from the Actions tab.
 on:
-  pull_request:
   workflow_dispatch:
 
 jobs:

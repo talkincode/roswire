@@ -81,11 +81,24 @@ impl CommandMapping {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProtocolRequest {
     pub mapping: CommandMapping,
     pub resolved_args: BTreeMap<String, String>,
     pub flags: Vec<String>,
+}
+
+impl std::fmt::Debug for ProtocolRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProtocolRequest")
+            .field("mapping", &self.mapping)
+            .field(
+                "resolved_args",
+                &crate::error::redact_resolved_args(&self.resolved_args),
+            )
+            .field("flags", &self.flags)
+            .finish()
+    }
 }
 
 impl ProtocolRequest {
@@ -493,7 +506,10 @@ fn mapping_error_context(invocation: &ParsedInvocation) -> ErrorContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_protocol_request, resolve_mapping, ActionKind, MappingRequest, RestMethod};
+    use super::{
+        build_protocol_request, resolve_mapping, ActionKind, MappingRequest, ProtocolRequest,
+        RestMethod,
+    };
     use crate::args::ParsedInvocation;
     use crate::error::ErrorCode;
     use std::collections::BTreeMap;
@@ -972,6 +988,31 @@ mod tests {
 
     fn invocation(path: &[&str], action: &str, args: &[(&str, &str)]) -> ParsedInvocation {
         invocation_with_flags(path, action, args, &[])
+    }
+
+    #[test]
+    fn debug_output_redacts_sensitive_resolved_args() {
+        let mapping =
+            resolve_mapping(&invocation(&["ip", "address"], "print", &[])).expect("mapping");
+        let secret = "SuperSecret123";
+        let request = ProtocolRequest {
+            mapping,
+            resolved_args: BTreeMap::from([
+                ("password".to_owned(), secret.to_owned()),
+                ("source".to_owned(), secret.to_owned()),
+                ("address".to_owned(), "10.0.0.1".to_owned()),
+            ]),
+            flags: Vec::new(),
+        };
+
+        let debug = format!("{request:?}");
+
+        assert!(
+            !debug.contains(secret),
+            "debug must not leak secret values: {debug}",
+        );
+        assert!(debug.contains("***REDACTED***"));
+        assert!(debug.contains("10.0.0.1"));
     }
 
     fn invocation_with_flags(

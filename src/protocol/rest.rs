@@ -4,12 +4,22 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::Value;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RestClient {
     base_url: String,
     user: String,
     password: String,
     agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for RestClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestClient")
+            .field("base_url", &self.base_url)
+            .field("user", &self.user)
+            .field("password", &"***REDACTED***")
+            .finish_non_exhaustive()
+    }
 }
 
 impl RestClient {
@@ -889,5 +899,20 @@ mod tests {
         ['t', 'e', 's', 't', '-', 'v', 'a', 'l', 'u', 'e']
             .into_iter()
             .collect()
+    }
+
+    #[test]
+    fn debug_output_redacts_password() {
+        let credential = test_credential();
+        let client = RestClient::with_base_url("http://127.0.0.1:8080", "admin", &credential);
+
+        let debug = format!("{client:?}");
+
+        assert!(
+            !debug.contains(&credential),
+            "debug must not leak password: {debug}",
+        );
+        assert!(debug.contains("***REDACTED***"));
+        assert!(debug.contains("admin"));
     }
 }

@@ -969,6 +969,16 @@ fn handle_secret_set_impl(
         _ => take_secret_input(&mut key_values, false, false)?,
     };
 
+    let allow_plain_opt_in = match key_values.remove("allow_plain") {
+        Some(raw) => Some(parse_bool_token("allow_plain", &raw)?),
+        None => None,
+    };
+    if allow_plain_opt_in.is_some() && secret_type != "plain" {
+        return Err(Box::new(RosWireError::usage(
+            "allow_plain is only valid for type=plain secrets",
+        )));
+    }
+
     let env = read_env_map();
     let paths = runtime_paths_from_env(&env);
     let _ = ensure_home_layout(&paths)?;
@@ -979,14 +989,14 @@ fn handle_secret_set_impl(
         return Err(Box::new(RosWireError::profile_not_found(profile_name)));
     }
 
-    let (secret_spec, normalized_type, toggled_plain) = match secret_type.as_str() {
+    let (secret_spec, normalized_type) = match secret_type.as_str() {
         "plain" => {
             let value = input_value.ok_or_else(|| {
                 Box::new(RosWireError::usage(
                     "plain secret requires value=<...>, env=<VAR>, or --stdin",
                 ))
             })?;
-            (SecretSpec::Plain { value }, "plain".to_owned(), true)
+            (SecretSpec::Plain { value }, "plain".to_owned())
         }
         "encrypted" => {
             let value = input_value.ok_or_else(|| {
@@ -1000,7 +1010,6 @@ fn handle_secret_set_impl(
             (
                 SecretSpec::Encrypted { key_id, value },
                 "encrypted".to_owned(),
-                false,
             )
         }
         "keychain" => {
@@ -1020,7 +1029,6 @@ fn handle_secret_set_impl(
             (
                 SecretSpec::Keychain { service, account },
                 "keychain".to_owned(),
-                false,
             )
         }
         "env" => {
@@ -1032,7 +1040,7 @@ fn handle_secret_set_impl(
                     "env secret stores an environment variable name; do not pass value=<...> or --stdin",
                 )));
             }
-            (SecretSpec::Env { var }, "env".to_owned(), false)
+            (SecretSpec::Env { var }, "env".to_owned())
         }
         "same-as" => {
             let target = key_values.remove("target").ok_or_else(|| {
@@ -1043,7 +1051,7 @@ fn handle_secret_set_impl(
                     "same-as secret does not accept value=<...>, env=<VAR>, or --stdin",
                 )));
             }
-            (SecretSpec::SameAs { target }, "same-as".to_owned(), false)
+            (SecretSpec::SameAs { target }, "same-as".to_owned())
         }
         _ => {
             return Err(Box::new(RosWireError::usage(format!(
@@ -1064,8 +1072,21 @@ fn handle_secret_set_impl(
             .get_mut(profile_name)
             .ok_or_else(|| Box::new(RosWireError::profile_not_found(profile_name)))?;
 
-        if toggled_plain {
-            profile.allow_plain_secrets = true;
+        if normalized_type == "plain" {
+            let permitted = profile.allow_plain_secrets || allow_plain_opt_in == Some(true);
+            if !permitted {
+                return Err(Box::new(
+                    RosWireError::config(
+                        "storing a plain secret requires allow_plain=true opt-in or allow_plain_secrets = true on the profile",
+                    )
+                    .with_hint(
+                        "re-run with allow_plain=true to explicitly allow plaintext secrets for this profile",
+                    ),
+                ));
+            }
+            if allow_plain_opt_in == Some(true) {
+                profile.allow_plain_secrets = true;
+            }
         }
 
         profile.secrets.insert(secret_name.to_owned(), secret_spec);
@@ -1113,6 +1134,16 @@ fn parse_key_value_tokens(tokens: &[String]) -> RosWireResult<BTreeMap<String, S
     }
 
     Ok(key_values)
+}
+
+fn parse_bool_token(key: &str, value: &str) -> RosWireResult<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(Box::new(RosWireError::usage(format!(
+            "{key} expects true or false, got: {other}",
+        )))),
+    }
 }
 
 fn parse_allow_from_list(value: &str) -> RosWireResult<Vec<String>> {

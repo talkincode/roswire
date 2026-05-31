@@ -136,6 +136,7 @@ fn config_secret_set_supports_multiple_types_and_redacts_values() {
             "password",
             "type=plain",
             "value=All.007!",
+            "allow_plain=true",
             "--json",
         ],
     )
@@ -192,6 +193,131 @@ fn config_secret_set_supports_multiple_types_and_redacts_values() {
 }
 
 #[test]
+fn config_secret_set_plain_requires_explicit_opt_in() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+
+    run(&temp, &["config", "init", "--json"]).success();
+    run(
+        &temp,
+        &[
+            "config",
+            "device",
+            "add",
+            "studio",
+            "host=10.189.189.1",
+            "user=master",
+            "--json",
+        ],
+    )
+    .success();
+
+    run(
+        &temp,
+        &[
+            "config",
+            "secret",
+            "set",
+            "studio",
+            "password",
+            "type=plain",
+            "value=All.007!",
+            "--json",
+        ],
+    )
+    .failure()
+    .stderr(predicate::str::contains("\"error_code\":\"CONFIG_ERROR\""))
+    .stderr(predicate::str::contains("allow_plain"))
+    .stderr(predicate::str::contains("All.007!").not());
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml"))
+        .expect("config should be readable");
+    assert!(!config.contains("allow_plain_secrets = true"));
+    assert!(!config.contains("All.007!"));
+}
+
+#[test]
+fn config_secret_set_plain_with_opt_in_enables_gate_and_stores() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+
+    run(&temp, &["config", "init", "--json"]).success();
+    run(
+        &temp,
+        &[
+            "config",
+            "device",
+            "add",
+            "studio",
+            "host=10.189.189.1",
+            "user=master",
+            "--json",
+        ],
+    )
+    .success();
+
+    run(
+        &temp,
+        &[
+            "config",
+            "secret",
+            "set",
+            "studio",
+            "password",
+            "type=plain",
+            "value=All.007!",
+            "allow_plain=true",
+            "--json",
+        ],
+    )
+    .success()
+    .stdout(predicate::str::contains("\"type\":\"plain\""))
+    .stdout(predicate::str::contains("\"allow_plain_secrets\":true"))
+    .stdout(predicate::str::contains("All.007!").not());
+
+    let config = std::fs::read_to_string(temp.path().join("config.toml"))
+        .expect("config should be readable");
+    assert!(config.contains("allow_plain_secrets = true"));
+}
+
+#[test]
+fn config_secret_set_rejects_allow_plain_for_non_plain_type() {
+    let temp = tempfile::tempdir().expect("temp dir should be created");
+
+    run(&temp, &["config", "init", "--json"]).success();
+    run(
+        &temp,
+        &[
+            "config",
+            "device",
+            "add",
+            "studio",
+            "host=10.189.189.1",
+            "user=master",
+            "--json",
+        ],
+    )
+    .success();
+
+    run(
+        &temp,
+        &[
+            "config",
+            "secret",
+            "set",
+            "studio",
+            "api_password",
+            "type=env",
+            "env=ROSWIRE_RUNTIME_PASSWORD",
+            "allow_plain=true",
+            "--json",
+        ],
+    )
+    .failure()
+    .stderr(predicate::str::contains(
+        "allow_plain is only valid for type=plain",
+    ));
+}
+
+#[test]
 fn config_secret_set_supports_env_stdin_and_encrypted_sources() {
     let temp = tempfile::tempdir().expect("temp dir should be created");
     let stdin_secret = generated_secret();
@@ -221,6 +347,7 @@ fn config_secret_set_supports_env_stdin_and_encrypted_sources() {
             "studio",
             "password",
             "type=plain",
+            "allow_plain=true",
             "--stdin",
             "--json",
         ])

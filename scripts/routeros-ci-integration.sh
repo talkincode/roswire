@@ -160,7 +160,7 @@ run_case config-device-add \
 assert_stdout_contains config-device-add '"schema_version": "roswire.config.device.v1"'
 
 run_stdin_case config-secret-password "$ROUTEROS_PASSWORD" \
-  --stdin config secret set "$ROUTEROS_PROFILE" password type=plain --json
+  --stdin config secret set "$ROUTEROS_PROFILE" password type=plain allow_plain=true --json
 assert_stdout_contains config-secret-password '"schema_version": "roswire.config.secret.v1"'
 
 run_case config-inspect --profile "$ROUTEROS_PROFILE" config inspect --json

@@ -1108,6 +1108,23 @@ mod tests {
         assert!(format!("{:?}", hops[0]).contains("***REDACTED***"));
         assert!(!format!("{:?}", hops[0]).contains("secret"));
 
+        let key_cli = Cli::try_parse_from([
+            "roswire",
+            "--jump-host",
+            "bastion.example",
+            "--jump-user",
+            "ops",
+            "--jump-host-key",
+            "SHA256:bastion",
+            "--jump-key",
+            "/tmp/id_ed25519",
+            "doctor",
+        ])
+        .expect("cli");
+        let key_hops = resolve_jump_hops(&key_cli, &BTreeMap::new(), None).expect("key cli hop");
+        assert_eq!(key_hops[0].key_path.as_deref(), Some("/tmp/id_ed25519"));
+        assert!(key_hops[0].password.is_none());
+
         let profile = ProfileConfig {
             allow_plain_secrets: true,
             jump: vec![crate::config::JumpHopConfig {

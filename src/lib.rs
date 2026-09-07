@@ -314,7 +314,7 @@ fn with_jump_stream<T>(
         &target.jump,
         &target.host,
         port,
-        Duration::from_secs(10),
+        target.connect_timeout,
         context,
     )?;
     logger.log_jump("jump.opened", "ok", io.audit_value());
@@ -583,7 +583,7 @@ impl LiveProtocolProbe<'_> {
             &self.target.jump,
             &self.target.host,
             default_port("rest"),
-            Duration::from_secs(10),
+            self.target.connect_timeout,
             &context,
         )?;
         let mut tls = protocol::classic::transport::wrap_tls_stream(
@@ -612,7 +612,7 @@ impl LiveProtocolProbe<'_> {
                 &self.target.jump,
                 &self.target.host,
                 default_port("api-ssl"),
-                Duration::from_secs(10),
+                self.target.connect_timeout,
                 &context,
             ) {
                 Ok(io) => match protocol::classic::transport::wrap_tls_stream(
@@ -644,7 +644,7 @@ impl LiveProtocolProbe<'_> {
                 &self.target.jump,
                 &self.target.host,
                 default_port("api"),
-                Duration::from_secs(10),
+                self.target.connect_timeout,
                 &context,
             ) {
                 Ok(io) => self.probe_classic(io),
@@ -711,6 +711,7 @@ pub(crate) struct ExecutionTarget {
     pub(crate) port: u16,
     pub(crate) tls_cert_fingerprint: Option<String>,
     pub(crate) jump: Vec<jump::ResolvedJumpHop>,
+    pub(crate) connect_timeout: Duration,
 }
 
 impl ExecutionTarget {
@@ -828,6 +829,7 @@ fn resolve_execution_target_with_env(
     }
 
     let jump = jump::resolve_jump_hops(cli, env, profile)?;
+    let connect_timeout = Duration::from_secs(cli.connect_timeout_seconds.unwrap_or(10));
 
     Ok(ExecutionTarget {
         host,
@@ -838,6 +840,7 @@ fn resolve_execution_target_with_env(
         port,
         tls_cert_fingerprint,
         jump,
+        connect_timeout,
     })
 }
 
@@ -946,6 +949,7 @@ mod tests {
     use clap::Parser;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::time::Duration;
 
     #[test]
     fn execution_target_uses_cli_values_and_defaults() {
@@ -971,6 +975,53 @@ mod tests {
         assert_eq!(target.requested_protocol, "auto");
         assert_eq!(target.routeros_version, "auto");
         assert_eq!(target.port, 8728);
+        assert!(target.jump.is_empty());
+        assert_eq!(target.connect_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn execution_target_resolves_jump_from_cli() {
+        let cli = Cli::try_parse_from([
+            "roswire",
+            "--host",
+            "192.0.2.1",
+            "--user",
+            "admin",
+            "--password",
+            "test-value",
+            "--jump-host",
+            "bastion.example",
+            "--jump-user",
+            "ops",
+            "--jump-host-key",
+            "SHA256:bastion",
+            "--jump-password",
+            "jump-secret",
+            "--connect-timeout-seconds",
+            "3",
+            "--protocol",
+            "api",
+            "interface",
+            "print",
+        ])
+        .expect("cli should parse");
+        let env = isolated_env();
+        let target = resolve_execution_target_with_env(&cli, &env).expect("target should resolve");
+        assert_eq!(target.jump.len(), 1);
+        assert_eq!(target.jump[0].host, "bastion.example");
+        assert_eq!(target.jump[0].user, "ops");
+        assert_eq!(target.connect_timeout, Duration::from_secs(3));
+        let context = execution_context(
+            &ParsedInvocation {
+                path: vec!["interface".to_owned()],
+                action: "print".to_owned(),
+                resolved_args: BTreeMap::new(),
+                flags: Vec::new(),
+            },
+            &target,
+            "api",
+        );
+        assert_eq!(context.jump, vec!["bastion.example".to_owned()]);
     }
 
     #[test]
@@ -1354,6 +1405,7 @@ value = "v1:nonce:ciphertext"
             port: 8728,
             tls_cert_fingerprint: None,
             jump: Vec::new(),
+            connect_timeout: Duration::from_secs(10),
         };
 
         let context = execution_context(&invocation, &target, "api");

@@ -587,8 +587,9 @@ fn expand_rest_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_auth_header, build_url, https_base_url, map_status_error, request_body,
-        rest_execution_request, routeros_error_message, RestClient,
+        basic_auth_header, build_url, decode_chunked_body, execute_request_on_stream,
+        get_on_stream, https_base_url, map_status_error, request_body, rest_execution_request,
+        routeros_error_message, send_on_stream, RestClient,
     };
     use crate::args::ParsedInvocation;
     use crate::error::ErrorCode;
@@ -686,6 +687,111 @@ mod tests {
         assert_eq!(value["version"], "7.15.3");
         assert!(request.contains("GET /rest/system/resource HTTP/1.1"));
         assert!(request.contains("Authorization: Basic"));
+    }
+
+    #[test]
+    fn stream_http_get_and_post_cover_jump_rest_client() {
+        let server = TestServer::responding_with(200, "application/json", r#"{"version":"7.16"}"#);
+        let mut stream = TcpStream::connect(&server.address).expect("connect");
+        let value = get_on_stream(
+            &mut stream,
+            "router.example",
+            443,
+            "admin",
+            "secret",
+            "/rest/system/resource",
+        )
+        .expect("get");
+        assert_eq!(value["version"], "7.16");
+        let request = server.request();
+        assert!(request.contains("GET /rest/system/resource HTTP/1.1"));
+        assert!(request.contains("Host: router.example"));
+
+        let server = TestServer::responding_with(204, "application/json", "");
+        let mut stream = TcpStream::connect(&server.address).expect("connect");
+        let value = send_on_stream(
+            &mut stream,
+            "192.0.2.1",
+            8443,
+            "admin",
+            "secret",
+            RestMethod::Post,
+            "rest/import",
+            Some(&serde_json::json!({"file-name": "a.rsc"})),
+        )
+        .expect("post");
+        assert_eq!(value["status"], "ok");
+        let request = server.request();
+        assert!(request.contains("POST /rest/import HTTP/1.1"));
+        assert!(request.contains("Host: 192.0.2.1:8443"));
+
+        let server = TestServer::responding_with(401, "application/json", r#"{"detail":"denied"}"#);
+        let mut stream = TcpStream::connect(&server.address).expect("connect");
+        let error = get_on_stream(
+            &mut stream,
+            "router.example",
+            443,
+            "admin",
+            "secret",
+            "/rest/system/resource",
+        )
+        .expect_err("auth");
+        assert_eq!(error.error_code, ErrorCode::AuthFailed);
+        let _ = server.request();
+    }
+
+    #[test]
+    fn stream_http_executes_mapped_print_and_decodes_chunks() {
+        let server = TestServer::responding_with(200, "application/json", r#"[{".id":"*1"}]"#);
+        let mut stream = TcpStream::connect(&server.address).expect("connect");
+        let request = build_protocol_request(&ParsedInvocation {
+            path: vec!["ip".to_owned(), "address".to_owned()],
+            action: "print".to_owned(),
+            resolved_args: BTreeMap::new(),
+            flags: Vec::new(),
+        })
+        .expect("map");
+        let value = execute_request_on_stream(
+            &mut stream,
+            "router.example",
+            443,
+            "admin",
+            "secret",
+            &request,
+        )
+        .expect("print");
+        assert_eq!(value[0][".id"], "*1");
+        let _ = server.request();
+
+        let decoded = decode_chunked_body(b"5\r\nhello\r\n0\r\n\r\n").expect("chunked");
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn stream_http_reads_chunked_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = read_request(&mut stream);
+            let body = "5\r\n{\"a\":\r\n2\r\n1}\r\n0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{body}"
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        let mut stream = TcpStream::connect(&address).expect("connect");
+        let value = get_on_stream(
+            &mut stream,
+            "router.example",
+            443,
+            "admin",
+            "secret",
+            "/rest/system/resource",
+        )
+        .expect("chunked json");
+        assert_eq!(value["a"], 1);
+        handle.join().expect("server");
     }
 
     #[test]

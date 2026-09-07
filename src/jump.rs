@@ -914,6 +914,7 @@ pub fn tcp_probe(host: &str, port: u16, timeout: Duration) -> Result<(), ErrorCo
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+    use clap::Parser;
 
     fn hop(host: &str, port: u16, user: &str) -> JumpHopIdentity {
         JumpHopIdentity {
@@ -1000,5 +1001,280 @@ mod tests {
         let finished = finish_with_leftover(Ok("payload"), &guard.leftover_handle())
             .expect_err("success plus leftover must not look successful");
         assert_eq!(finished.error_code, ErrorCode::JumpTeardownFailed);
+    }
+
+    #[test]
+    fn finish_with_leftover_keeps_ok_and_original_errors() {
+        let clean = AtomicBool::new(false);
+        assert_eq!(finish_with_leftover(Ok(7), &clean).expect("ok"), 7);
+        let err = finish_with_leftover::<()>(
+            Err(Box::new(RosWireError::network("unreachable"))),
+            &AtomicBool::new(true),
+        )
+        .expect_err("original error wins");
+        assert_eq!(err.error_code, ErrorCode::NetworkError);
+    }
+
+    #[test]
+    fn resolve_identities_from_cli_and_profile() {
+        let cli = Cli::try_parse_from([
+            "roswire",
+            "--jump-host",
+            "bastion.example",
+            "--jump-user",
+            "ops",
+            "--jump-port",
+            "2222",
+            "doctor",
+        ])
+        .expect("cli");
+        let hops = resolve_jump_identities(&cli, None).expect("identities");
+        assert_eq!(hops, vec![hop("bastion.example", 2222, "ops")]);
+
+        let missing_user =
+            Cli::try_parse_from(["roswire", "--jump-host", "bastion.example", "doctor"])
+                .expect("cli");
+        let error = resolve_jump_identities(&missing_user, None).expect_err("user required");
+        assert_eq!(error.error_code, ErrorCode::ConfigError);
+
+        let mac = Cli::try_parse_from([
+            "roswire",
+            "--jump-host",
+            "48:8F:5A:A3:0E:A7",
+            "--jump-user",
+            "ops",
+            "doctor",
+        ])
+        .expect("cli");
+        assert!(resolve_jump_identities(&mac, None).is_err());
+
+        let profile = ProfileConfig {
+            jump: vec![
+                crate::config::JumpHopConfig {
+                    host: Some("edge.example".to_owned()),
+                    user: Some("ops".to_owned()),
+                    host_key: Some("SHA256:edge".to_owned()),
+                    ..crate::config::JumpHopConfig::default()
+                },
+                crate::config::JumpHopConfig {
+                    host: None,
+                    user: Some("skip".to_owned()),
+                    ..crate::config::JumpHopConfig::default()
+                },
+            ],
+            ..ProfileConfig::default()
+        };
+        let bare = Cli::try_parse_from(["roswire", "doctor"]).expect("cli");
+        let hops = resolve_jump_identities(&bare, Some(&profile)).expect("profile hops");
+        assert_eq!(hops, vec![hop("edge.example", 22, "ops")]);
+        assert!(resolve_jump_identities(&bare, None)
+            .expect("no jump")
+            .is_empty());
+    }
+
+    #[test]
+    fn resolve_hops_requires_host_key_and_reads_secrets() {
+        let missing_key = Cli::try_parse_from([
+            "roswire",
+            "--jump-host",
+            "bastion.example",
+            "--jump-user",
+            "ops",
+            "--jump-password",
+            "secret",
+            "doctor",
+        ])
+        .expect("cli");
+        let error =
+            resolve_jump_hops(&missing_key, &BTreeMap::new(), None).expect_err("host key required");
+        assert_eq!(error.error_code, ErrorCode::JumpHostKeyRequired);
+
+        let cli = Cli::try_parse_from([
+            "roswire",
+            "--jump-host",
+            "bastion.example",
+            "--jump-user",
+            "ops",
+            "--jump-host-key",
+            "SHA256:bastion",
+            "--jump-password",
+            "secret",
+            "doctor",
+        ])
+        .expect("cli");
+        let hops = resolve_jump_hops(&cli, &BTreeMap::new(), None).expect("cli hop");
+        assert_eq!(hops[0].host, "bastion.example");
+        assert_eq!(hops[0].password.as_deref(), Some("secret"));
+        assert!(format!("{:?}", hops[0]).contains("***REDACTED***"));
+        assert!(!format!("{:?}", hops[0]).contains("secret"));
+
+        let profile = ProfileConfig {
+            allow_plain_secrets: true,
+            jump: vec![crate::config::JumpHopConfig {
+                host: Some("edge.example".to_owned()),
+                port: Some(22),
+                user: Some("ops".to_owned()),
+                host_key: Some("SHA256:edge".to_owned()),
+                ..crate::config::JumpHopConfig::default()
+            }],
+            secrets: BTreeMap::from([(
+                "jump_password".to_owned(),
+                crate::config::SecretSpec::Plain {
+                    value: "profile-secret".to_owned(),
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+        let bare = Cli::try_parse_from(["roswire", "doctor"]).expect("cli");
+        let hops = resolve_jump_hops(&bare, &BTreeMap::new(), Some(&profile)).expect("profile hop");
+        assert_eq!(hops[0].user, "ops");
+        assert_eq!(hops[0].password.as_deref(), Some("profile-secret"));
+        assert_eq!(identities_from_hops(&hops)[0].host, "edge.example");
+
+        assert!(resolve_jump_hops(&bare, &BTreeMap::new(), None)
+            .expect("empty")
+            .is_empty());
+
+        let missing_profile_key = ProfileConfig {
+            jump: vec![crate::config::JumpHopConfig {
+                host: Some("edge.example".to_owned()),
+                user: Some("ops".to_owned()),
+                ..crate::config::JumpHopConfig::default()
+            }],
+            ..ProfileConfig::default()
+        };
+        let error = resolve_jump_hops(&bare, &BTreeMap::new(), Some(&missing_profile_key))
+            .expect_err("profile host key");
+        assert_eq!(error.error_code, ErrorCode::JumpHostKeyRequired);
+
+        let missing_user = ProfileConfig {
+            jump: vec![crate::config::JumpHopConfig {
+                host: Some("edge.example".to_owned()),
+                host_key: Some("SHA256:edge".to_owned()),
+                ..crate::config::JumpHopConfig::default()
+            }],
+            ..ProfileConfig::default()
+        };
+        assert!(resolve_jump_hops(&bare, &BTreeMap::new(), Some(&missing_user)).is_err());
+        assert!(resolve_jump_identities(&bare, Some(&missing_user)).is_err());
+
+        let missing_password = ProfileConfig {
+            jump: vec![crate::config::JumpHopConfig {
+                host: Some("edge.example".to_owned()),
+                user: Some("ops".to_owned()),
+                host_key: Some("SHA256:edge".to_owned()),
+                ..crate::config::JumpHopConfig::default()
+            }],
+            ..ProfileConfig::default()
+        };
+        assert!(resolve_jump_hops(&bare, &BTreeMap::new(), Some(&missing_password)).is_err());
+    }
+
+    #[test]
+    fn resolve_profile_hop_indexed_secret_and_key_auth() {
+        let profile = ProfileConfig {
+            allow_plain_secrets: true,
+            jump: vec![crate::config::JumpHopConfig {
+                host: Some("edge.example".to_owned()),
+                user: Some("ops".to_owned()),
+                key: Some("/tmp/id_ed25519".to_owned()),
+                host_key: Some("SHA256:edge".to_owned()),
+                ..crate::config::JumpHopConfig::default()
+            }],
+            secrets: BTreeMap::from([(
+                "jump_0_key_passphrase".to_owned(),
+                crate::config::SecretSpec::Plain {
+                    value: "phrase".to_owned(),
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+        let bare = Cli::try_parse_from(["roswire", "doctor"]).expect("cli");
+        let hops = resolve_jump_hops(&bare, &BTreeMap::new(), Some(&profile)).expect("key hop");
+        assert_eq!(hops[0].key_path.as_deref(), Some("/tmp/id_ed25519"));
+        assert_eq!(hops[0].key_passphrase.as_deref(), Some("phrase"));
+        assert!(hops[0].password.is_none());
+    }
+
+    #[test]
+    fn tcp_probe_and_stream_pair_and_open_channel_errors() {
+        assert_eq!(
+            tcp_probe("192.0.2.1", 1, Duration::from_millis(50)).unwrap_err(),
+            ErrorCode::NetworkError,
+        );
+        let (mut left, mut right) = stream_pair().expect("pair");
+        right.write_all(b"ping").expect("write");
+        let mut buf = [0_u8; 4];
+        left.read_exact(&mut buf).expect("read");
+        assert_eq!(&buf, b"ping");
+
+        let error = match open_channel(
+            &[],
+            "192.168.88.1",
+            8728,
+            Duration::from_millis(50),
+            &ErrorContext::default(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("empty hops should fail"),
+        };
+        assert_eq!(error.error_code, ErrorCode::ConfigError);
+
+        let hop = ResolvedJumpHop {
+            host: "192.0.2.1".to_owned(),
+            port: 1,
+            user: "ops".to_owned(),
+            password: Some("secret".to_owned()),
+            key_path: None,
+            key_passphrase: None,
+            expected_host_key: "SHA256:test".to_owned(),
+        };
+        let error = match open_channel(
+            &[hop],
+            "192.168.88.1",
+            8728,
+            Duration::from_millis(80),
+            &ErrorContext::default(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unreachable bastion should fail"),
+        };
+        assert_eq!(error.error_code, ErrorCode::NetworkError);
+    }
+
+    #[test]
+    fn jump_io_empty_channel_close_and_audit() {
+        let mut io = JumpIo {
+            channel: None,
+            sessions: Vec::new(),
+            pumps: Vec::new(),
+            leftover: Arc::new(AtomicBool::new(false)),
+            closed: false,
+            hops: vec![hop("bastion.example", 22, "ops")],
+            target_host: "192.168.88.1".to_owned(),
+            target_port: 8728,
+        };
+        assert_eq!(io.hops()[0].host, "bastion.example");
+        assert!(!io.leftover());
+        let mut buf = [0_u8; 1];
+        assert_eq!(io.read(&mut buf).expect("read"), 0);
+        assert_eq!(io.write(b"x").expect("write"), 0);
+        io.flush().expect("flush");
+        let audit = io.audit_value();
+        assert_eq!(audit["local_bind"], false);
+        io.close().expect("close");
+        io.close().expect("idempotent close");
+        let error = match io.into_target_ssh_session(
+            "admin",
+            Some("secret"),
+            None,
+            None,
+            "SHA256:test",
+            &ErrorContext::default(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("closed channel cannot start target ssh"),
+        };
+        assert_eq!(error.error_code, ErrorCode::NetworkError);
     }
 }

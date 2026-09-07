@@ -370,7 +370,7 @@ fn remote_doctor_rest_jump_result(
         &target.jump,
         &target.host,
         port,
-        Duration::from_secs(10),
+        target.connect_timeout,
         &ErrorContext {
             host: target.host.clone(),
             ..ErrorContext::default()
@@ -400,7 +400,7 @@ fn jump_plain_stream(
         &target.jump,
         &target.host,
         port,
-        Duration::from_secs(10),
+        target.connect_timeout,
         &ErrorContext {
             host: target.host.clone(),
             ..ErrorContext::default()
@@ -615,6 +615,10 @@ mod tests {
             dependencies
                 .get("remote_schema_overlay")
                 .map(String::as_str),
+            Some("available"),
+        );
+        assert_eq!(
+            dependencies.get("jump_direct_tcpip").map(String::as_str),
             Some("available"),
         );
     }

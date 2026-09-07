@@ -168,6 +168,152 @@ host_key = "SHA256:bastion"
 }
 
 #[test]
+fn doctor_include_remote_reports_jump_legs_when_bastion_is_unreachable() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    command(temp.path())
+        .args(["config", "init", "--json"])
+        .assert()
+        .success();
+    write_config(
+        temp.path(),
+        r#"
+version = 1
+default_profile = "lab"
+
+[profiles.lab]
+host = "192.0.2.1"
+user = "admin"
+protocol = "api"
+allow_plain_secrets = true
+
+[[profiles.lab.jump]]
+host = "192.0.2.1"
+port = 1
+user = "ops"
+host_key = "SHA256:bastion"
+
+[profiles.lab.secrets.password]
+type = "plain"
+value = "secret"
+[profiles.lab.secrets.jump_password]
+type = "plain"
+value = "jump-secret"
+"#,
+    );
+
+    command(temp.path())
+        .args(["doctor", "--include-remote", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"role\": \"bastion\""))
+        .stdout(predicate::str::contains("\"role\": \"target\""))
+        .stdout(predicate::str::contains("NETWORK_ERROR"));
+}
+
+fn command_via_unreachable_jump_fails_with_network_error(protocol: &str) {
+    let temp = tempfile::tempdir().expect("temp dir");
+    command(temp.path())
+        .args(["config", "init", "--json"])
+        .assert()
+        .success();
+    command(temp.path())
+        .args([
+            "--host",
+            "192.0.2.1",
+            "--user",
+            "admin",
+            "--password",
+            "secret",
+            "--protocol",
+            protocol,
+            "--jump-host",
+            "192.0.2.1",
+            "--jump-port",
+            "1",
+            "--jump-user",
+            "ops",
+            "--jump-host-key",
+            "SHA256:test",
+            "--jump-password",
+            "jump-secret",
+            "--connect-timeout-seconds",
+            "1",
+            "--json",
+            "ip",
+            "address",
+            "print",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("NETWORK_ERROR"));
+}
+
+#[test]
+fn api_command_via_unreachable_jump_returns_network_error() {
+    command_via_unreachable_jump_fails_with_network_error("api");
+}
+
+#[test]
+fn rest_command_via_unreachable_jump_returns_network_error() {
+    command_via_unreachable_jump_fails_with_network_error("rest");
+}
+
+#[test]
+fn api_ssl_command_via_unreachable_jump_returns_network_error() {
+    command_via_unreachable_jump_fails_with_network_error("api-ssl");
+}
+
+#[test]
+fn auto_command_via_unreachable_jump_returns_network_error() {
+    command_via_unreachable_jump_fails_with_network_error("auto");
+}
+
+#[test]
+fn transfer_upload_via_unreachable_jump_returns_network_error() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let local = temp.path().join("setup.rsc");
+    fs::write(&local, b"/system identity print\n").expect("file");
+    command(temp.path())
+        .args(["config", "init", "--json"])
+        .assert()
+        .success();
+    command(temp.path())
+        .args([
+            "file",
+            "upload",
+            local.to_str().expect("path"),
+            "flash/setup.rsc",
+            "--host",
+            "192.0.2.1",
+            "--user",
+            "admin",
+            "--password",
+            "secret",
+            "--ssh-host-key",
+            "SHA256:router",
+            "--jump-host",
+            "192.0.2.1",
+            "--jump-port",
+            "1",
+            "--jump-user",
+            "ops",
+            "--jump-host-key",
+            "SHA256:bastion",
+            "--jump-password",
+            "jump-secret",
+            "--allow-from",
+            "203.0.113.10/32",
+            "--connect-timeout-seconds",
+            "1",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NETWORK_ERROR"));
+}
+
+#[test]
 fn transfer_dry_run_includes_jump_via() {
     let temp = tempfile::tempdir().expect("temp dir");
     command(temp.path())

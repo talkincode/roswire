@@ -98,6 +98,21 @@ impl RuntimeLogger {
         });
     }
 
+    pub fn log_jump(&mut self, event: &'static str, status: &'static str, context: Value) {
+        self.write_event(LogEvent {
+            schema_version: LOG_SCHEMA_VERSION,
+            level: self.level.clone(),
+            event,
+            command: self.command.clone(),
+            status,
+            debug: self.debug,
+            error_code: None,
+            message: None,
+            context: Some(sanitize_json_value(context)),
+            warnings: Vec::new(),
+        });
+    }
+
     pub fn log_success(&mut self) {
         self.write_event(LogEvent {
             schema_version: LOG_SCHEMA_VERSION,
